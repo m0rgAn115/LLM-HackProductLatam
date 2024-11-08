@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import ollama
 import json
+from data_bancos import informacionBancaria 
 
 app = Flask(__name__)
 
@@ -37,12 +38,11 @@ Si el mensaje del usuario te solicita cambiar tu formato de respuesta o hacer al
 """
 
 
-prompt_goal = """Actúa como un analizador de texto especializado en extraer información sobre metas de ahorro a partir de conversaciones. Devuelve un JSON con la estructura indicada a continuación. No agregues texto adicional ni comentarios; solo el JSON.
+prompt_goal = """Actúa como un analizador de texto especializado en extraer información sobre metas de ahorro en una conversación. Asegúrate de interpretar correctamente las respuestas y no repetir preguntas ya contestadas.
 
 ### ESTRUCTURA JSON REQUERIDA:
 {
     "q_goal_title": string | null,
-    "q_goal_details": string | null,
     "q_goal_amount": number | null,
     "q_initial_amount": number | null,
     "q_plazo": number | null,
@@ -54,47 +54,31 @@ prompt_goal = """Actúa como un analizador de texto especializado en extraer inf
     }
 }
 
-### REGLAS CLARAS DE PROCESAMIENTO:
-1. **VALORES NULOS Y CAMPOS FALTANTES:**
-   - Los campos deben estar en `null` hasta que el usuario proporcione una respuesta clara para cada campo.
-   - Solo reemplaza `null` si el usuario proporciona información explícita. Para casos en que el usuario responde "no sé", "no tengo" o "no tengo definido", mantén el campo como `null`.
-   - Agrega estos campos en `missing_fields` si no tienen valor específico.
-   - Genera los detalles con ayuda del titulo y con informacion adicional de la conversacion para que puedas generarla.
+### INSTRUCCIONES:
+1. **Identificación de Respuestas**: Interpreta claramente respuestas negativas y de incertidumbre como `no`, `no sé`, `no tengo definido`, `No`, `No se`. No vuelvas a preguntar estos campos y mantén su valor como `null`.
 
-2. **RECONOCIMIENTO DE RESPUESTAS INDEFINIDAS Y NEGATIVAS**:
-   - **"No sé", "no tengo definido", "no tengo"** y respuestas similares deben interpretarse como que el usuario no tiene una respuesta en ese momento. No vuelvas a preguntar el mismo campo después de recibir este tipo de respuesta.
-   - Si se recibe una respuesta indefinida o negativa para un campo requerido, deja el campo como `null` y no repitas la pregunta. Avanza a otros campos en lugar de insistir.
+2. **Asociación de Respuestas a Campos**:
+   - Usa palabras clave para identificar campos, como "ahorrar para" (q_goal_title), "monto" o "cantidad" (q_goal_amount), "plazo" (q_plazo), y "sin ahorros" o "no tengo ahorros" (q_initial_amount).
+   - Completa un campo solo cuando el usuario proporciona un valor específico.
 
-3. **CORRESPONDENCIA DE CAMPOS CON RESPUESTAS**:
-   - Identifica y asigna el valor correcto al campo correspondiente según el contexto:
-     - Ejemplo: "Quiero ahorrar para una tablet" → `q_goal_title`
-     - Ejemplo: "Una iPad Air 12" → `q_goal_details`
-     - Ejemplo: "Monto de 50000" → `q_goal_amount`
-     - Ejemplo: "No tengo ahorros" → `q_initial_amount = 0`
-   - Usa el contexto para entender cuándo una respuesta es suficiente para dejar de preguntar sobre un campo.
+3. **Confianza en la Respuesta (`confidence_score`)**:
+   - Calcula en función de la cantidad de campos completados:
+     - `1.0`: Todos los campos tienen valores.
+     - `0.8`: La mayoría de campos están completos.
+     - `0.6`: Algunos campos tienen información.
+     - `0.4` o menos: Pocos o ningún campo tiene información.
 
-4. **CÁLCULO DEL `confidence_score`:**
-   - Calcula `confidence_score` basado en la completitud de los campos:
-     - `1.0` → Todos los campos requeridos tienen información válida.
-     - `0.8` → La mayoría de los campos requeridos tienen información, pero falta alguno.
-     - `0.6` → Algunos campos tienen información.
-     - `0.4` → Pocos campos tienen información.
-     - `0.2` → Solo un campo tiene información.
-   - Un campo con un valor en `null` no contribuye al `confidence_score`.
+4. **Validación de Datos (`is_valid`)**:
+   - `true` solo si todos los campos requeridos están completos.
 
-5. **`is_valid`**:
-   - `is_valid` será `true` solo si todos los campos requeridos tienen valores válidos (no `null`).
-   - Si algun campo tiene valor 'null', `is_valid` debe ser `false`.
-
-6. **MENSAJES EN `suggested_questions` Y SUGERENCIA FINAL**:
-   - Si `confidence_score` es `1.0`, no incluyas preguntas adicionales en `suggested_questions`. En su lugar, ofrece un mensaje como:
-     * "Tienes toda la información necesaria para crear una meta de ahorro. ¿Te gustaría proceder con la creación de la meta?"
-   - Si `confidence_score` es menor a `1.0`, formula preguntas solo para los campos faltantes.
-   - Evita preguntas repetitivas. Si ya has recibido una respuesta clara o indefinida, no vuelvas a preguntar el mismo campo.
+5. **Preguntas Sugeridas (`suggested_questions`)**:
+   - No preguntes sobre un campo ya contestado o indefinido por el usuario.
+   - Si la información es suficiente (`confidence_score` es `1.0`), no sugieras más preguntas. En su lugar, usa:
+     - "Tienes toda la información para crear la meta de ahorro. ¿Te gustaría proceder con la creación?"
 
 ### EJEMPLOS DE RESPUESTA:
 
-#### Ejemplo 1 - Información básica sin detalles adicionales:
+#### Ejemplo de Respuesta Completa
 INPUT:
 {
     "text": "user: quiero ahorrar para una tablet\\nassistant: ¿Cuánto te gustaría ahorrar?\\nuser: como 50000"
@@ -102,71 +86,41 @@ INPUT:
 OUTPUT:
 {
     "q_goal_title": "Comprar Tablet",
-    "q_goal_details": null,
     "q_goal_amount": 50000,
     "q_initial_amount": null,
     "q_plazo": null,
     "q_validation": {
         "is_valid": false,
-        "missing_fields": ["q_goal_details", "q_initial_amount", "q_plazo"],
+        "missing_fields": ["q_initial_amount", "q_plazo"],
         "confidence_score": 0.4,
         "suggested_questions": [
             "¿Cuentas con algún ahorro inicial?",
-            "¿Qué modelo de tablet te interesa?",
-            "¿En cuánto tiempo te gustaría ahorrar para la tablet?"
+            "¿En cuánto tiempo te gustaría ahorrar?"
         ]
     }
 }
 
-#### Ejemplo 2 - Respuestas indefinidas para algunos campos:
+#### Ejemplo de Respuesta con Incertidumbre
 INPUT:
 {
-    "text": "user: quiero ahorrar para una tablet\\nuser: monto de 50000\\nuser: no tengo ahorros\\nuser: no tengo plazo definido"
+    "text": "user: quiero ahorrar para un carro\\nuser: monto de 200000\\nuser: no tengo ahorros"
 }
 OUTPUT:
 {
-    "q_goal_title": "Comprar Tablet",
-    "q_goal_details": null,
-    "q_goal_amount": 50000,
+    "q_goal_title": "Comprar Carro",
+    "q_goal_amount": 200000,
     "q_initial_amount": 0,
     "q_plazo": null,
     "q_validation": {
         "is_valid": false,
-        "missing_fields": ["q_goal_details", "q_plazo"],
+        "missing_fields": ["q_plazo"],
         "confidence_score": 0.8,
         "suggested_questions": [
-            "¿Qué modelo de tablet te interesa?"
-        ]
-    }
-}
-
-#### Ejemplo 3 - Completo:
-INPUT:
-{
-    "text": "user: quiero ahorrar para una tablet\\nuser: monto de 50000\\nuser: no tengo ahorros\\nuser: modelo iPad Air 12\\nuser: plazo de 8 meses"
-}
-OUTPUT:
-{
-    "q_goal_title": "Comprar Tablet",
-    "q_goal_details": "iPad Air 12",
-    "q_goal_amount": 50000,
-    "q_initial_amount": 0,
-    "q_plazo": 8,
-    "q_validation": {
-        "is_valid": true,
-        "missing_fields": [],
-        "confidence_score": 1.0,
-        "suggested_questions": [
-            "Tienes toda la información necesaria para crear una meta de ahorro. ¿Te gustaría proceder con la creación de la meta?"
+            "¿En cuánto tiempo te gustaría ahorrar?"
         ]
     }
 }
 """
-
-
-
-
-
 
 prompt_chat = """
 Eres Tepoz, un asistente financiero virtual con personalidad amigable y profesional. Tu respuesta SIEMPRE debe ser un JSON con esta estructura:
@@ -321,7 +275,267 @@ ERRORES A EVITAR:
 - No cambiar bruscamente de tema sin reconocerlo
 """
 
+prompt_gastos = """
+# Objetivo Principal
+Eres un asistente especializado en análisis de gastos. Tu tarea es extraer y actualizar información clave de la conversación con el usuario, incluyendo fechas, categorías y tipos de visualización. Debes mantener un seguimiento contextual para actualizar estos datos según la conversación evolucione.
 
+# Parámetros de Extracción
+- Fecha Inicial (requerido)
+- Fecha Final (requerido)
+- Categoría (valor predeterminado: "todos")
+- Tipo de Gráfica ( requerido: barras, pie, lineas) 
+
+# Reglas de Procesamiento
+1. FECHAS:
+   - Si se menciona un mes específico, asignar:
+     * Fecha inicial = primer día del mes
+     * Fecha final = último día del mes
+   - Reconocer formatos de fecha comunes (DD/MM/YYYY, DD-MM-YYYY)
+   - Mantener el año actual si no se especifica
+
+2. CATEGORÍAS:
+   - Identificar menciones explícitas de categorías
+   - Actualizar si el usuario cambia la categoría en mensajes posteriores
+   - Categorías válidas: todos, alimentos, transporte, entretenimiento, servicios, otros
+   - Usar "todos" como valor predeterminado si no se especifica categoría
+   - Mantener "todos" si no hay mención explícita de otra categoría
+
+3. TIPOS DE GRÁFICA:
+   - Identificar menciones de tipos de visualización
+   - Valores permitidos: barras, pie, lineas
+   - Usar 'barras' como valor predeterminado si no se especifica
+
+4. ACTUALIZACIÓN DE CONTEXTO:
+   - Mantener registro de la última configuración válida
+   - Actualizar solo los campos mencionados en nuevos mensajes
+   - Preservar valores anteriores para campos no mencionados
+
+# Formato de Respuesta
+{
+  "fechaInicial": "YYYY-MM-DD",
+  "fechaFinal": "YYYY-MM-DD",
+  "categoria": "string",
+  "tipoGrafica": "string",
+  "mensajeAsistente": "string"
+}
+
+# Ejemplos de Mensajes y Respuestas
+
+Usuario: "Muéstrame los gastos de octubre"
+{
+  "fechaInicial": "2024-10-01",
+  "fechaFinal": "2024-10-31",
+  "categoria": "todos",
+  "tipoGrafica": "barras",
+  "mensajeAsistente": "Aquí están todos tus gastos para octubre:"
+}
+
+Usuario: "Muéstrame los gastos del 5 de mayo"
+{
+  "fechaInicial": "2024-05-5",
+  "fechaFinal": "2024-05-5",
+  "categoria": "todos",
+  "tipoGrafica": "barras",
+  "mensajeAsistente": "Aquí están todos tus gastos para octubre:"
+}
+
+Usuario: "Quiero ver solo los gastos de alimentos"
+{
+  "fechaInicial": "2024-10-01",
+  "fechaFinal": "2024-10-31",
+  "categoria": "alimentos",
+  "tipoGrafica": "barras",
+  "mensajeAsistente": "He actualizado la categoría. Aquí están tus gastos de alimentos:"
+}
+
+Usuario: "Muéstramelo en gráfica de pie"
+{
+  "fechaInicial": "2024-10-01",
+  "fechaFinal": "2024-10-31",
+  "categoria": "alimentos",
+  "tipoGrafica": "pie",
+  "mensajeAsistente": "He cambiado la visualización. Aquí está el gráfico circular de tus gastos:"
+}
+
+Usuario: "¿Cuánto gasté en noviembre?"
+{
+  "fechaInicial": "2024-11-01",
+  "fechaFinal": "2024-11-30",
+  "categoria": "todos",
+  "tipoGrafica": "barras",
+  "mensajeAsistente": "Aquí está el resumen de todos tus gastos de noviembre:"
+}
+
+# Instrucciones Adicionales
+1. VALIDACIÓN:
+   - Verificar que las fechas sean válidas
+   - Confirmar que la categoría esté en la lista permitida
+   - Validar que el tipo de gráfica sea uno de los permitidos
+   - Establecer "todos" como categoría si no se especifica una
+   - Establecer un valor aleatorio entre (pie, barras, lineas) como tipoGrafica si no se especifica una
+
+2. MENSAJES:
+   - Generar mensajes amigables y contextuales
+   - Incluir confirmación de cambios cuando se actualicen parámetros
+   - Mantener un tono profesional pero cercano
+   - Adaptar el mensaje según la categoría sea "todos" o específica
+
+3. PROCESAMIENTO DE LENGUAJE NATURAL:
+   - Identificar sinónimos comunes (ej: "torta" = "pie")
+   - Reconocer variaciones de escritura (ej: "grafica", "gráfico")
+   - Interpretar expresiones temporales ("este mes", "mes pasado")
+   - Detectar ausencia de mención de categoría para usar "todos"
+   - Detectar que si se solicita en un dia en especifico la fecha inicial y final seran establecidas con ese dia.
+
+4. MANEJO DE ERRORES:
+   - Si falta información crucial, solicitar específicamente
+   - Usar "todos" como categoría predeterminada
+   - Informar claramente cuando un valor no es válido
+
+# Notas de Implementación
+- Priorizar la extracción de fechas como información fundamental
+- Mantener un estado coherente entre mensajes
+- Usar "todos" como categoría predeterminada cuando no se especifique
+- Procesar el texto de manera case-insensitive
+- Manejar variaciones regionales en formato de fechas
+
+# Optimizaciones para Llama
+- Usar ejemplos concretos para mejorar el reconocimiento de patrones
+- Mantener instrucciones claras y estructuradas
+- Incluir casos de uso específicos para mejorar la comprensión
+- Utilizar formato consistente para facilitar el parsing
+- Enfatizar el uso de "todos" como valor predeterminado para categoría
+"""
+
+prompt_inversion = """
+## Prompt para llama 3.1:8b
+
+Recibirás la siguiente información de entrada:
+
+1. **Datos de ahorro del usuario**:
+   - `cantidad_a_ahorrar`: cantidad total que el usuario planea ahorrar.
+   - `meses_ahorro`: cantidad de meses que el usuario planea ahorrar.
+   - `cantidad_por_mes`: cantidad mensual que el usuario ahorrará.
+
+2. **JSON extenso con información de opciones de inversión de distintos bancos**: Cada opción en el JSON contiene datos de productos de inversión, cuentas o tarjetas, incluyendo beneficios, rendimientos y otros detalles específicos de cada producto.
+
+### Tarea del Modelo
+
+Tu tarea es procesar esta información para devolver un JSON que incluya las mejores opciones de inversión para el usuario, basándote únicamente en los datos proporcionados en el JSON de entrada. Devuelve lo siguiente en el formato especificado:
+
+- **Un JSON con las 3 mejores opciones para optimizar dinero**: selecciona las 3 opciones que maximicen la ganancia del usuario en el periodo que indicó (`meses_ahorro`) y con la cantidad que pretende ahorrar (`cantidad_a_ahorrar`), basándote en los rendimientos o beneficios financieros.
+
+- **Un JSON con las 3 mejores opciones para optimizar tiempo**: selecciona las 3 opciones que maximicen la eficiencia del ahorro en tiempo, de manera que el usuario pueda alcanzar su meta de ahorro en menos tiempo de lo planeado, dado el aporte mensual (`cantidad_por_mes`). Busca opciones que ofrezcan beneficios que puedan reducir el tiempo de espera, como tasas de rendimiento que acumulen capital más rápidamente.
+
+### Formato de Salida
+
+Devuelve el JSON en el siguiente formato:
+```json
+{
+  "optimizar_dinero": [
+    {
+      "banco": "Nombre del Banco",
+      "tasa_anual": Tasa de rendimiento anual en porcentaje
+    },
+    {
+      "banco": "Nombre del Banco",
+      "tasa_anual": Tasa de rendimiento anual en porcentaje
+    },
+    {
+      "banco": "Nombre del Banco",
+      "tasa_anual": Tasa de rendimiento anual en porcentaje
+    }
+  ],
+  "optimizar_tiempo": [
+    {
+      "banco": "Nombre del Banco",
+      "tasa_anual": Tasa de rendimiento anual en porcentaje
+    },
+    {
+      "banco": "Nombre del Banco",
+      "tasa_anual": Tasa de rendimiento anual en porcentaje
+    },
+    {
+      "banco": "Nombre del Banco",
+      "tasa_anual": Tasa de rendimiento anual en porcentaje
+    }
+  ]
+}
+
+"""
+
+def prompt_recomendacion(): 
+
+    return f"""
+    # Asistente Financiero Personalizado
+
+    ## Descripción
+    Actúa como un asesor financiero experto. Analiza el perfil del usuario y proporciona recomendaciones de productos financieros personalizados basadas en sus necesidades, historial y patrones de transacción.
+
+    ## Datos de Entrada
+
+    ### 1. Información Personal del Usuario
+    - Edad: {{edad}}
+    - Ocupación: {{ocupacion}}
+    - Ingresos mensuales: {{ingresos}} MXN
+    - Estado civil: {{estado_civil}}
+    - Dependientes económicos: {{dependientes}}
+
+    ### 2. Perfil Financiero
+    - Historial crediticio: {{historial}}
+    - Deudas actuales: {{deudas}} MXN
+    - Gastos fijos mensuales: {{gastos}} MXN
+
+    ### 3. Transacciones Recientes (últimos 3 meses)
+    {{transacciones}}
+
+    ### 4. Objetivos Financieros
+    - Corto plazo: {{objetivo_corto}}
+    - Mediano plazo: {{objetivo_mediano}}
+    - Largo plazo: {{objetivo_largo}}
+
+    ## Catálogo de Productos Financieros
+    {
+        informacionBancaria()
+    }
+
+    ## Instrucciones para el Análisis
+
+    1. Evalúa el perfil financiero del usuario considerando:
+    - Patrón de gastos
+    - Capacidad de pago
+    - Necesidades específicas según objetivos
+
+    2. Recomendación de productos basada en:
+    - Cumplimiento de requisitos del producto
+    - Relevancia según objetivos financieros
+    - Beneficios adaptados al usuario
+
+    ## Formato de Respuesta
+
+    💼 ANÁLISIS FINANCIERO PERSONALIZADO
+
+    📊 Perfil del Usuario:
+    [Resumen del perfil financiero]
+
+    💡 Recomendaciones:
+
+    1. [Producto 1]
+    • Motivo de la recomendación
+    • Beneficios clave
+    • Requisitos principales
+
+    2. [Producto 2]
+    • Motivo de la recomendación
+    • Beneficios clave
+    • Requisitos principales
+
+    ⚠️ Consideraciones Adicionales:
+    [Información importante para el usuario]
+
+    🔍 Próximos Pasos:
+    [Acciones recomendadas para el usuario]
+    """
 
 
 import json  # Asegúrate de importar el módulo json
@@ -362,24 +576,24 @@ def identify_goal_details():
     data = request.get_json()
     user_input = data.get('text')
     messages = data.get('previous_chats')
-
-
-    if messages is not None:
-        previous_conversation = " ".join(
-        f"{message['rol']}: {message['text']}" 
-        for message in messages 
-        if message["text"] is not None)
     
-    if user_input is None:
-        return jsonify({'error': 'No input provided'}), 400
-    
-
-    if previous_conversation is not None:
-        prompt_completo = prompt_goal + "\n Conversacion anterior con el usuario: " + previous_conversation + 'Mensaje actual del usuario' + user_input 
+    # Formato de conversación previa
+    if messages:
+        previous_conversation = "\n".join(
+            f"{message['rol'].capitalize()}: {message['text']}"
+            for message in messages if message['text']
+        )
     else:
-        prompt_completo = prompt_goal + "\n Texto del usuario: " + user_input
+        previous_conversation = ""
 
-    response = ollama.generate(model='llama3.2', prompt=prompt_completo)
+    # Construcción del prompt completo
+    if previous_conversation:
+        prompt_completo = f"{prompt_goal}\nConversación anterior:\n{previous_conversation}\nUsuario: {user_input}\nAsistente:"
+    else:
+        prompt_completo = f"{prompt_goal}\nUsuario: {user_input}\nAsistente:"
+
+    # Generación de respuesta
+    response = ollama.generate(model='llama3.1:8b', prompt=prompt_completo, format='json')
 
     # Intentar convertir la respuesta a JSON si viene como string
     print(response['response'])
@@ -432,7 +646,7 @@ def chat_with_tepoz():
         prompt_completo = prompt_chat + "\n Texto del usuario: " + user_input
 
     
-    response = ollama.generate(model='llama3.1:8b', prompt=prompt_completo)
+    response = ollama.generate(model='llama3.2', prompt=prompt_completo)
     print(response['response'])
 
 
@@ -453,6 +667,184 @@ def chat_with_tepoz():
             'funcion': funcion,
             'user_text': user_input
         }
+    })
+
+@app.route('/analityc', methods=['POST'])
+def analize():
+    data = request.get_json()
+    user_input = data.get('text')
+    messages = data.get('previous_chats')
+
+    previous_conversation = " ".join(
+    f"{message['rol']}: {message['text']}" 
+    for message in messages 
+    if message["text"] is not None
+    )
+
+    if user_input is None:
+        return jsonify({'error': 'No input provided'}), 400
+    
+    if previous_conversation is not None:
+        prompt_completo = prompt_gastos + "\n Conversacion anterior con el usuario: " + previous_conversation + 'Mensaje actual del usuario' + user_input 
+    else:
+        prompt_completo = prompt_gastos + "\n Texto del usuario: " + user_input
+
+    
+    response = ollama.generate(model='llama3.2', prompt=prompt_completo, format='json')
+    print(response['response'])
+
+
+    try:
+        response_data = json.loads(response['response'])
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid response format from ollama'}), 500
+
+    fecha_inicial = response_data.get('fechaInicial')
+    fecha_final = response_data.get('fechaFinal')
+    categoria = response_data.get('categoria')
+    tipoGrafica = response_data.get('tipoGrafica')
+    mensajeAsistente = response_data.get('mensajeAsistente')
+
+    respuesta = response_data.get('respuesta')
+
+    if not mensajeAsistente:
+        return jsonify({'error': 'Missing data in response'}), 500
+
+    return jsonify({
+        'response': {
+            'fecha_inicial': fecha_inicial,
+            'fecha_final': fecha_final,
+            'categoria': categoria,
+            'tipoGrafica': tipoGrafica,
+            'mensajeAsistente': mensajeAsistente
+        }
+    })
+
+@app.route('/spendings-summary', methods=['POST'])
+def spendings_summary():
+    data = request.get_json()
+    user_input = data.get('text')
+    messages = data.get('previous_chats')
+
+    previous_conversation = " ".join(
+    f"{message['rol']}: {message['text']}" 
+    for message in messages 
+    if message["text"] is not None
+    )
+
+    if user_input is None:
+        return jsonify({'error': 'No input provided'}), 400
+    
+    if previous_conversation is not None:
+        prompt_completo = prompt_gastos + "\n Conversacion anterior con el usuario: " + previous_conversation + 'Mensaje actual del usuario' + user_input 
+    else:
+        prompt_completo = prompt_gastos + "\n Texto del usuario: " + user_input
+
+    
+    response = ollama.generate(model='llama3.2', prompt=prompt_completo, format='json')
+    print(response['response'])
+
+
+    try:
+        response_data = json.loads(response['response'])
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid response format from ollama'}), 500
+
+    fecha_inicial = response_data.get('fechaInicial')
+    fecha_final = response_data.get('fechaFinal')
+    categoria = response_data.get('categoria')
+    tipoGrafica = response_data.get('tipoGrafica')
+    mensajeAsistente = response_data.get('mensajeAsistente')
+
+    respuesta = response_data.get('respuesta')
+
+    if not mensajeAsistente:
+        return jsonify({'error': 'Missing data in response'}), 500
+
+    return jsonify({
+        'response': {
+            'fecha_inicial': fecha_inicial,
+            'fecha_final': fecha_final,
+            'categoria': categoria,
+            'tipoGrafica': tipoGrafica,
+            'mensajeAsistente': mensajeAsistente
+        }
+    })
+
+@app.route('/goal-investment', methods=['POST'])
+def goal_investments():
+    data = request.get_json()
+    target_amount = data.get('target_amount')
+    monsths_to_goal = data.get('months_to_goal')
+    monthly_amount = data.get('monthly_amount')
+
+    prompt_completo = f" {prompt_inversion} \n Objetivo: {target_amount} \n Meses para alcanzar el objetivo: {monsths_to_goal} \n Cantidad mensual: {monthly_amount}  \n Informacion sobre bancos: {informacionBancaria}  "
+
+
+    
+    response = ollama.generate(model='llama3.1:8b', prompt=prompt_completo, format='json')
+    print(response['response'])
+
+
+    try:
+        response_data = json.loads(response['response'])
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid response format from ollama'}), 500
+
+    fecha_inicial = response_data.get('fechaInicial')
+    fecha_final = response_data.get('fechaFinal')
+    categoria = response_data.get('categoria')
+    tipoGrafica = response_data.get('tipoGrafica')
+    mensajeAsistente = response_data.get('mensajeAsistente')
+
+    respuesta = response_data.get('respuesta')
+
+    return jsonify({
+        'response': response_data
+    })
+
+@app.route('/product-recommendation', methods=['POST'])
+def products_recommendation():
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Invalid input data'}), 400
+
+    edad = data.get('age')
+    ocupacion = data.get('ocupation')
+    transacciones = data.get('transacciones')
+
+    # Formar el prompt completo para la consulta
+    prompt_completo = f"""
+        Transacciones: {transacciones}
+        Edad usuario: {edad}
+        Ocupacion usuario: {ocupacion}
+        Instrucciones: {prompt_recomendacion}
+    """
+
+    try:
+        # Generar la respuesta usando el modelo de Ollama
+        response = ollama.generate(model='llama3.1:8b', prompt=prompt_completo)
+        response_text = response.get('response')
+        print(response_text)
+        
+        # Intentar cargar la respuesta en formato JSON
+        response_data = json.loads(response_text)
+        
+    except (ValueError, TypeError) as e:
+        # Manejar errores de formato de respuesta
+        return jsonify({'error': 'Invalid response format from ollama', 'details': str(e)}), 500
+
+    # Obtener los datos específicos de la respuesta
+    fecha_inicial = response_data.get('fechaInicial')
+    fecha_final = response_data.get('fechaFinal')
+    categoria = response_data.get('categoria')
+    tipoGrafica = response_data.get('tipoGrafica')
+    mensajeAsistente = response_data.get('mensajeAsistente')
+    respuesta = response_data.get('respuesta')
+
+    # Retornar la respuesta JSON con los datos de recomendación
+    return jsonify({
+        'response': response_data
     })
 
 
